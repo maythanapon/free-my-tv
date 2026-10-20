@@ -40,6 +40,8 @@ LAT="$(number latitude 40.7128)"
 LON="$(number longitude -74.0060)"
 ASSIST=false; [ "$(prop disable_assistant false)" = "true" ] && ASSIST=true
 CRYPTO=false; [ "$(prop show_crypto true)" = "true" ] && CRYPTO=true
+TRIP_LAT="$(number trip_latitude 0)"
+TRIP_LON="$(number trip_longitude 0)"
 
 rm -rf out && mkdir -p out/gen/io/freemytv out/classes
 cat > out/gen/io/freemytv/Config.java <<EOF
@@ -57,16 +59,31 @@ final class Config {
     static final String LANGUAGE = "$(prop language auto)";
     static final String CURRENCY = "$(prop currency USD)";
     static final String TEMPERATURE = "$(prop temperature auto)";
+    static final String HOME_TIMEZONE = "$(prop home_timezone '')";
+    static final String TRIP_NAME = "$(prop trip_name '')";
+    static final String TRIP_DATE = "$(prop trip_date '')";
+    static final String TRIP_LATITUDE = "$TRIP_LAT";
+    static final String TRIP_LONGITUDE = "$TRIP_LON";
+    static final String TRIP_TIMEZONE = "$(prop trip_timezone UTC)";
+    static final String TRIP_TIME_LABEL = "$(prop trip_time_label 'LOCAL TIME')";
+    static final String TRIP_COUNTRY_CODE = "$(prop trip_country_code '')";
     static final boolean DISABLE_ASSISTANT = $ASSIST;
     static final boolean SHOW_CRYPTO = $CRYPTO;
 }
 EOF
 
+mkdir -p out/private-assets
+WALLPAPER="$(prop background_image '')"
+if [ -n "$WALLPAPER" ]; then
+  [ -f "$WALLPAPER" ] || { echo "Configured wallpaper file not found." >&2; exit 1; }
+  cp "$WALLPAPER" out/private-assets/background.jpeg
+fi
+
 # --- Build
 "$BT/aapt2" compile --dir app/res -o out/res.zip
 # Fonts uncompressed: Android reads them straight from the APK.
 "$BT/aapt2" link -o out/base.apk -I "$AJ" --manifest app/AndroidManifest.xml --java out/gen out/res.zip \
-  --min-sdk-version 28 --target-sdk-version 33 -A app/assets -0 ttf
+  --min-sdk-version 28 --target-sdk-version 33 -A app/assets -A out/private-assets -0 ttf
 "$JAVAC" -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$AJ:$BT/core-lambda-stubs.jar" -classpath "$AJ" \
   -d out/classes $(find app/src out/gen -name '*.java')
 "$BT/d8" --release --min-api 28 --lib "$AJ" --output out $(find out/classes -name '*.class')

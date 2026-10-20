@@ -16,6 +16,7 @@
         <package android:name="com.netflix.ninja" />
         <package android:name="com.google.android.youtube.tv" />
         <package android:name="com.amazon.amazonvideo.livingroom" />
+        <package android:name="com.viu.tv" />
         <package android:name="com.disney.disneyplus" />
         <package android:name="com.wbd.stream" />
         <package android:name="com.apple.atve.androidtv.appletv" />

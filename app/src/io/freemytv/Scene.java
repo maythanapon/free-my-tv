@@ -248,9 +248,10 @@ final class Scene {
         if (alpha <= 0.004f) return;
         if (glass == null) {
             if (body > 0) {
-                flatFill.setColor(Ui.alpha(tint | 0xFF000000, Math.max(0.35f, tintAlpha)));
+                flatFill.setColor(Ui.alpha(tint | 0xFF000000, Math.max(0.35f, tintAlpha) * Math.min(1, alpha)));
                 c.drawRoundRect(r, radius, radius, flatFill);
             }
+            flatRim.setAlpha(Math.round(51 * Math.min(1, alpha)));
             c.drawRoundRect(r, radius, radius, flatRim);
             return;
         }

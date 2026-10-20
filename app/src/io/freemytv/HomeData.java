@@ -37,6 +37,48 @@ final class HomeData {
     private static final String WEATHER_QUERY = "&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset"
             + "&hourly=temperature_2m,weather_code,is_day&timezone=auto&forecast_days=2";
 
+    private static final String TRAVEL_URL = "https://api.open-meteo.com/v1/forecast?latitude=" + Config.TRIP_LATITUDE
+            + "&longitude=" + Config.TRIP_LONGITUDE
+            + "&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min"
+            + "&forecast_days=1&timezone=" + DashboardConfig.TRIP_ZONE.getId().replace("/", "%2F") + "&timeformat=unixtime";
+
+    static final class TravelWeather {
+        final double temp, max, min;
+        final int code;
+        final boolean isDay;
+        final long sampledAt;
+        TravelWeather(String body) throws Exception {
+            JSONObject response = new JSONObject(body);
+            JSONObject current = response.getJSONObject("current");
+            JSONObject daily = response.optJSONObject("daily");
+            max = daily == null ? Double.NaN : daily.getJSONArray("temperature_2m_max").optDouble(0, Double.NaN);
+            min = daily == null ? Double.NaN : daily.getJSONArray("temperature_2m_min").optDouble(0, Double.NaN);
+            temp = current.getDouble("temperature_2m");
+            code = current.getInt("weather_code");
+            isDay = current.getInt("is_day") == 1;
+            sampledAt = current.getLong("time") * 1000L;
+            if (Double.isNaN(temp) || Double.isInfinite(temp) || code < 0) throw new IOException("Invalid travel weather");
+        }
+    }
+    private static final String AIR_URL = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude="
+            + Config.LATITUDE + "&longitude=" + Config.LONGITUDE + "&current=us_aqi,pm2_5&timeformat=unixtime";
+
+    static final class AirQuality {
+        final int aqi;
+        final String pm25, time;
+        final long sampledAt;
+        AirQuality(JSONObject current) throws Exception {
+            aqi = current.getInt("us_aqi");
+            double pm = current.getDouble("pm2_5");
+            if (aqi < 0 || pm < 0 || Double.isNaN(pm) || Double.isInfinite(pm)) throw new IOException("Invalid air quality");
+            pm25 = String.format(Locale.US, "PM2.5 %.1f µg/m³", pm);
+            sampledAt = current.getLong("time") * 1000L;
+            SimpleDateFormat format = new SimpleDateFormat("HH:mm", Locale.US);
+            format.setTimeZone(TimeZone.getTimeZone(DashboardConfig.HOME_ZONE));
+            time = format.format(new java.util.Date(sampledAt));
+        }
+    }
+
     private static String weatherPlace() {
         return Prefs.latitude() + "," + Prefs.longitude();
     }
@@ -109,6 +151,12 @@ final class HomeData {
     final double[] changes = {Double.NaN, Double.NaN, Double.NaN, Double.NaN};
     volatile long pricesAt, weatherAt;
     volatile Weather weather = new Weather();
+    volatile AirQuality airQuality;
+    volatile TravelWeather travelWeather;
+    private volatile long travelAttemptAt;
+    private volatile boolean fetchingTravel;
+    private volatile long airAttemptAt;
+    private volatile boolean fetchingAir;
 
     private final SharedPreferences cache;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -118,6 +166,11 @@ final class HomeData {
 
     private HomeData(Context c) {
         cache = c.getSharedPreferences("homedata", Context.MODE_PRIVATE);
+        try {
+            String body = cache.getString("travelWeather", null);
+            if (!TRAVEL_URL.equals(cache.getString("travelWeatherUrl", ""))) body = null;
+            if (body != null) travelWeather = new TravelWeather(body);
+        } catch (Exception ignored) {}
         try {
             if (Prefs.quotes()) {
                 String p = cache.getString("prices", null);
@@ -131,6 +184,10 @@ final class HomeData {
                 weatherAt = cache.getLong("weatherAt", 0);
             }
         } catch (Exception ignored) {}
+        try {
+            String body = cache.getString("airQuality", null);
+            if (body != null) airQuality = new AirQuality(new JSONObject(body).getJSONObject("current"));
+        } catch (Exception ignored) {}
     }
 
     void addListener(Listener l) { if (!listeners.contains(l)) listeners.add(l); }
@@ -139,6 +196,42 @@ final class HomeData {
     /** Fetches whatever is stale. The screen calls this when it appears and every minute while it's visible. */
     void refreshIfStale() {
         long now = System.currentTimeMillis();
+        if (DashboardConfig.TRIP_ENABLED && !fetchingTravel && (now - travelAttemptAt > WEATHER_EVERY || now < travelAttemptAt)) {
+            fetchingTravel = true;
+            travelAttemptAt = now;
+            io.execute(() -> {
+                try {
+                    String body = get(TRAVEL_URL);
+                    TravelWeather next = new TravelWeather(body);
+                    cache.edit().putString("travelWeather", body).putString("travelWeatherUrl", TRAVEL_URL).apply();
+                    travelWeather = next;
+                } catch (Exception e) {
+                    AppLog.w("travel weather: " + e.getMessage());
+                    travelAttemptAt = System.currentTimeMillis() - WEATHER_EVERY + 5 * 60_000L;
+                } finally {
+                    fetchingTravel = false;
+                    notifyListeners();
+                }
+            });
+        }
+        if (!fetchingAir && (now - airAttemptAt > 30 * 60_000L || now < airAttemptAt)) {
+            fetchingAir = true;
+            airAttemptAt = now;
+            io.execute(() -> {
+                try {
+                    String body = get(AIR_URL);
+                    airQuality = new AirQuality(new JSONObject(body).getJSONObject("current"));
+                    cache.edit().putString("airQuality", body).apply();
+                } catch (Exception e) {
+                    AppLog.w("air quality: " + e.getMessage());
+                    // Retry failed requests after five minutes rather than every frame/minute.
+                    airAttemptAt = System.currentTimeMillis() - 25 * 60_000L;
+                } finally {
+                    fetchingAir = false;
+                    notifyListeners();
+                }
+            });
+        }
         // A negative age (the TV's clock went back) counts as stale: otherwise the data would freeze.
         if (!fetchingPrices && coinCount() > 0 && (now - pricesAt > PRICES_EVERY || now < pricesAt)) {
             fetchingPrices = true;
@@ -354,6 +447,8 @@ final class HomeData {
         if (Double.isNaN(v)) return "—";
         return Math.round(fahrenheit() ? v * 9 / 5 + 32 : v) + "°";
     }
+
+    static String temperatureUnit() { return fahrenheit() ? "F" : "C"; }
 
     private static boolean fahrenheit() {
         String unit = Prefs.temperature();

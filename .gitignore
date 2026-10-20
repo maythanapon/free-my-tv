@@ -1,5 +1,11 @@
 # Your settings and signing key stay on your machine
 config.properties
+HANDOFF.md
+# Personal wallpaper inputs and generated private asset
+/background.jpg
+/background.jpeg
+/app/assets/background.jpeg
+/private/
 *.keystore
 *.idsig
 
