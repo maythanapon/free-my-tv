@@ -281,10 +281,13 @@ var Data = (function () {
   }
 
   var GENRES = {
+    ru: {"Action & Adventure": "Боевик и приключения", "Sci-Fi & Fantasy": "Фантастика и фэнтези", "War & Politics": "Война и политика", "Kids": "Для детей", "News": "Новости", "Soap": "Мыльная опера", "Talk": "Ток-шоу"},
     pt: {'Action & Adventure': 'Ação e Aventura', 'Sci-Fi & Fantasy': 'Ficção Científica e Fantasia', 'War & Politics': 'Guerra e Política',
       'Kids': 'Infantil', 'News': 'Notícias', 'Soap': 'Novela', 'Talk': 'Entrevistas'},
     es: {'Action & Adventure': 'Acción y Aventura', 'Sci-Fi & Fantasy': 'Ciencia ficción y Fantasía', 'War & Politics': 'Guerra y Política',
-      'Kids': 'Infantil', 'News': 'Noticias', 'Soap': 'Telenovela', 'Talk': 'Entrevistas'}
+      'Kids': 'Infantil', 'News': 'Noticias', 'Soap': 'Telenovela', 'Talk': 'Entrevistas'},
+    de: {'Action & Adventure': 'Action & Abenteuer', 'War & Politics': 'Krieg & Politik', 'Kids': 'Kinder', 'News': 'Nachrichten',
+      'Soap': 'Seifenoper', 'Talk': 'Talkshow'}
   };
 
   /** The best backdrop: no text over it, the largest, then the best rated. */
@@ -314,10 +317,10 @@ var Data = (function () {
       }
       if (p.kind === 'movie' && o.runtime > 0) {
         var h = Math.floor(o.runtime / 60), m = o.runtime % 60;
-        parts.push(I18N.lang === 'en' ? (h ? h + 'h ' + m + 'm' : m + 'm') : (h ? h + ' h ' + m + ' min' : m + ' min'));
+        parts.push(I18N.lang === 'ru' ? (h ? h + ' ч ' + m + ' мин' : m + ' мин') : I18N.lang === 'en' ? (h ? h + 'h ' + m + 'm' : m + 'm') : (h ? h + ' h ' + m + ' min' : m + ' min'));
       } else if (p.kind === 'tv' && o.number_of_seasons > 0) {
         var n = o.number_of_seasons;
-        parts.push(tr(n === 1 ? '1 temporada' : n + ' temporadas', n === 1 ? '1 season' : n + ' seasons', n === 1 ? '1 temporada' : n + ' temporadas'));
+        parts.push(I18N.lang === 'ru' ? I18N.count(n, 'сезон', 'сезона', 'сезонов') : tr(n === 1 ? '1 temporada' : n + ' temporadas', n === 1 ? '1 season' : n + ' seasons', n === 1 ? '1 temporada' : n + ' temporadas'));
       }
       var wp = o['watch/providers'], here = wp && wp.results && wp.results[REGION], flat = here && here.flatrate;
       p.app = null;
@@ -327,8 +330,25 @@ var Data = (function () {
       }
       if (p.service && p.app) parts.push(p.service);
       p.meta = parts.join(' · ');
-      p.detailed = true;
-      done(null);
+      title(p, o, function () {
+        p.detailed = true;
+        done(null);
+      });
+    });
+  }
+
+  /**
+   * Without a title in the TV's language TMDB answers with the original one, so a Korean series on a German TV reads
+   * "닥터X: 하얀 마피아의 시대". Then the English title, when TMDB has one (one more request, only for those).
+   */
+  function title(p, o, done) {
+    var field = p.kind === 'movie' ? 'title' : 'name', own = o[field] || p.title;
+    p.title = own;
+    if (I18N.lang === 'en' || !own || own !== o['original_' + field] || o.original_language === I18N.lang
+        || o.original_language === 'en') { done(); return; }
+    tmdb('/' + p.kind + '/' + p.id + '?language=en-US', function (err, en) {
+      if (!err && en && en[field]) p.title = en[field];
+      done();
     });
   }
 
@@ -499,7 +519,8 @@ var Data = (function () {
     hour: function (at) {
       var d = new Date(at), h = d.getHours();
       if (I18N.lang === 'en') return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM');
-      return I18N.lang === 'es' ? (h < 10 ? '0' : '') + h + ':00' : h + 'h';
+      if (I18N.lang === 'de') return (h < 10 ? '0' : '') + h + ' Uhr';
+      return (I18N.lang === 'es' || I18N.lang === 'ru') ? (h < 10 ? '0' : '') + h + ':00' : h + 'h';
     },
     time: function (at) {
       var d = new Date(at), h = d.getHours(), m = d.getMinutes();
