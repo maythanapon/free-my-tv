@@ -142,6 +142,16 @@ var Data = (function () {
   var COINS = ['BTC', 'ETH', 'SOL', 'USDT'];
   var CURRENCY = Place.currency;
   var QUOTE = CURRENCY === 'USD' ? 'USDT' : CURRENCY;
+  /** Binance refuses the whole request when it has no pairs in the currency (INR...): the prices go in dollars then. */
+  function inDollars() {
+    store('dollarsFor', CURRENCY);
+    CURRENCY = 'USD';
+    QUOTE = 'USDT';
+  }
+  if (stored('dollarsFor') === CURRENCY && CURRENCY !== 'USD') {
+    CURRENCY = 'USD';
+    QUOTE = 'USDT';
+  }
   var prices = [NaN, NaN, NaN, NaN], changes = [NaN, NaN, NaN, NaN], pricesAt = 0, fetchingPrices = false;
 
   /** Indexes in COINS of the coins that are on (the dollar only in Brazilian reais, where Binance lists it). */
@@ -176,13 +186,25 @@ var Data = (function () {
     if (!coins.length || fetchingPrices || (now - pricesAt < 5 * 60000 && now >= pricesAt)) return;
     fetchingPrices = true;
     var symbols = coins.map(function (i) { return '%22' + COINS[i] + QUOTE + '%22'; }).join(',');
-    get('https://api.binance.com/api/v3/ticker/24hr?type=MINI&symbols=%5B' + symbols + '%5D', {}, function (err, body) {
-      fetchingPrices = false;
-      if (err || !parsePrices(body)) return;
-      pricesAt = Date.now();
-      store('prices', {quote: QUOTE, body: body, at: pricesAt});
-      changed();
-    });
+    var path = '/api/v3/ticker/24hr?type=MINI&symbols=%5B' + symbols + '%5D';
+    // Binance.com refuses the US (HTTP 451); Binance.US answers the same call in dollars.
+    var hosts = ['https://api.binance.com', 'https://api.binance.us'];
+    (function next(h, refused) {
+      get(hosts[h] + path, {}, function (err, body) {
+        // A pair Binance doesn't list (HTTP 400): the prices go in dollars. Binance.US has only dollar pairs: its 400
+        // counts only where Binance.com refuses the US (HTTP 451), not after a timeout or a 5xx there.
+        if (err && err.message === 'HTTP 400' && QUOTE !== 'USDT' && (h === 0 || refused)) { fetchingPrices = false; inDollars(); refreshPrices(); return; }
+        if (err || !parsePrices(body)) {
+          if (h + 1 < hosts.length && !(err && err.message === 'HTTP 400')) next(h + 1, err && err.message === 'HTTP 451');
+          else fetchingPrices = false;
+          return;
+        }
+        fetchingPrices = false;
+        pricesAt = Date.now();
+        store('prices', {quote: QUOTE, body: body, at: pricesAt});
+        changed();
+      });
+    })(0);
   }
 
   // MARK: - Picks (TMDB)
@@ -201,7 +223,9 @@ var Data = (function () {
     ['peacock', 'peacock', /peacock/, /peacock/i, 'Peacock'],
     ['globoplay', 'globoplay', /globoplay/, /globoplay/i, 'Globoplay'],
     ['max', 'max', /hbo|wbd|\.max/, /^(hbo )?max$|hbo max/i, 'Max'],
-    ['apple tv', 'appletv', /appletv|apple\.tv/, /apple tv/i, 'Apple TV']
+    ['apple tv', 'appletv', /appletv|apple\.tv/, /apple tv/i, 'Apple TV'],
+    ['hotstar', 'hotstar', /hotstar/, /hotstar/i, 'JioHotstar'],
+    ['crunchyroll', 'crunchyroll', /crunchyroll/, /crunchyroll/i, 'Crunchyroll']
   ];
 
   var installed = [];   // the TV's apps, from TV.apps()
@@ -217,10 +241,13 @@ var Data = (function () {
     return null;
   }
 
-  function service(providerName) {
+  /** "… Amazon Channel" is sold inside another app; Apple TV is only the streaming service (350; 2 is the store). */
+  function service(providerName, providerId) {
     var n = (providerName || '').toLowerCase();
+    if (n.indexOf(' channel') >= 0) return null;
     for (var i = 0; i < SERVICES.length; i++) {
       var s = SERVICES[i];
+      if (s[1] === 'appletv' && providerId !== 350) continue;
       if (s[0] === 'max' ? /\bmax\b/.test(n) : n.indexOf(s[0]) >= 0) return s;
     }
     return null;
@@ -244,7 +271,7 @@ var Data = (function () {
   }
 
   function sourceStamp() {
-    var s = KEY.length + ':' + KEY.slice(-6) + ':' + REGION;
+    var s = KEY.length + ':' + KEY.slice(-6) + ':' + REGION + (CONFIG.hideAnimation ? ':no-animation' : '');
     for (var i = 0; i < SERVICES.length; i++) s += appFor(SERVICES[i][1]) ? '1' : '0';
     return s;
   }
@@ -272,7 +299,12 @@ var Data = (function () {
     return out;
   }
 
-  function lang() { return I18N.locale(); }
+  /** TMDB's language, as on Android: Latin American Spanish unless the TV is in Spain, and Germany's German. */
+  function lang() {
+    if (I18N.lang === 'es') return /-ES\b/i.test(navigator.language || '') ? 'es-ES' : 'es-MX';
+    if (I18N.lang === 'de') return 'de-DE';   // TMDB's de-AT and de-CH have few translations of their own
+    return I18N.locale();
+  }
 
   function day(offset) {
     var d = new Date(Date.now() + offset * 86400000);
@@ -280,15 +312,19 @@ var Data = (function () {
     return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate());
   }
 
-  var GENRES = {
-    ru: {"Action & Adventure": "Боевик и приключения", "Sci-Fi & Fantasy": "Фантастика и фэнтези", "War & Politics": "Война и политика", "Kids": "Для детей", "News": "Новости", "Soap": "Мыльная опера", "Talk": "Ток-шоу"},
-    pt: {'Action & Adventure': 'Ação e Aventura', 'Sci-Fi & Fantasy': 'Ficção Científica e Fantasia', 'War & Politics': 'Guerra e Política',
-      'Kids': 'Infantil', 'News': 'Notícias', 'Soap': 'Novela', 'Talk': 'Entrevistas'},
-    es: {'Action & Adventure': 'Acción y Aventura', 'Sci-Fi & Fantasy': 'Ciencia ficción y Fantasía', 'War & Politics': 'Guerra y Política',
-      'Kids': 'Infantil', 'News': 'Noticias', 'Soap': 'Telenovela', 'Talk': 'Entrevistas'},
-    de: {'Action & Adventure': 'Action & Abenteuer', 'War & Politics': 'Krieg & Politik', 'Kids': 'Kinder', 'News': 'Nachrichten',
-      'Soap': 'Seifenoper', 'Talk': 'Talkshow'}
-  };
+  /** TMDB's genres that it leaves in English in some languages. */
+  function genre(name) {
+    switch (name) {
+      case 'Action & Adventure': return tr('genre|Action & Adventure');
+      case 'Sci-Fi & Fantasy': return tr('genre|Sci-Fi & Fantasy');
+      case 'War & Politics': return tr('genre|War & Politics');
+      case 'Kids': return tr('genre|Kids');
+      case 'News': return tr('genre|News');
+      case 'Soap': return tr('genre|Soap');
+      case 'Talk': return tr('genre|Talk');
+      default: return name;
+    }
+  }
 
   /** The best backdrop: no text over it, the largest, then the best rated. */
   function bestBackdrop(images) {
@@ -305,27 +341,25 @@ var Data = (function () {
   /** Genre, runtime or seasons, and the service it's on among the TV's apps. */
   function details(p, done) {
     tmdb('/' + p.kind + '/' + p.id + '?language=' + lang() + '&append_to_response=watch/providers,images&include_image_language=null,'
-        + I18N.lang + ',en', function (err, o) {
+        + I18N.base + ',en', function (err, o) {
       if (err) { done(err); return; }
       var best = bestBackdrop(o.images);
       if (best) p.backdrop = best;
       var parts = [];
-      if (p.kind === 'tv') parts.push(tr('Série', 'Series', 'Serie'));
+      if (p.kind === 'tv') parts.push(tr('Series'));
       if (o.genres && o.genres.length) {
-        var g = o.genres[0].name, table = GENRES[I18N.lang];
-        parts.push(table && table[g] ? table[g] : g);
+        parts.push(genre(o.genres[0].name));
       }
       if (p.kind === 'movie' && o.runtime > 0) {
         var h = Math.floor(o.runtime / 60), m = o.runtime % 60;
-        parts.push(I18N.lang === 'ru' ? (h ? h + ' ч ' + m + ' мин' : m + ' мин') : I18N.lang === 'en' ? (h ? h + 'h ' + m + 'm' : m + 'm') : (h ? h + ' h ' + m + ' min' : m + ' min'));
+        parts.push(h ? trf('{h}h {m}m', {h: h, m: m}) : trf('{m}m', {m: m}));
       } else if (p.kind === 'tv' && o.number_of_seasons > 0) {
-        var n = o.number_of_seasons;
-        parts.push(I18N.lang === 'ru' ? I18N.count(n, 'сезон', 'сезона', 'сезонов') : tr(n === 1 ? '1 temporada' : n + ' temporadas', n === 1 ? '1 season' : n + ' seasons', n === 1 ? '1 temporada' : n + ' temporadas'));
+        parts.push(plural('plural|one:{n} season|other:{n} seasons', o.number_of_seasons));
       }
       var wp = o['watch/providers'], here = wp && wp.results && wp.results[REGION], flat = here && here.flatrate;
       p.app = null;
       for (var i = 0; flat && i < flat.length && !p.app; i++) {
-        var s = service(flat[i].provider_name);
+        var s = service(flat[i].provider_name, flat[i].provider_id);
         if (s && appFor(s[1])) { p.app = s[1]; p.service = s[4]; }
       }
       if (p.service && p.app) parts.push(p.service);
@@ -344,7 +378,7 @@ var Data = (function () {
   function title(p, o, done) {
     var field = p.kind === 'movie' ? 'title' : 'name', own = o[field] || p.title;
     p.title = own;
-    if (I18N.lang === 'en' || !own || own !== o['original_' + field] || o.original_language === I18N.lang
+    if (I18N.lang === 'en' || !own || own !== o['original_' + field] || o.original_language === I18N.base
         || o.original_language === 'en') { done(); return; }
     tmdb('/' + p.kind + '/' + p.id + '?language=en-US', function (err, en) {
       if (!err && en && en[field]) p.title = en[field];
@@ -352,8 +386,17 @@ var Data = (function () {
     });
   }
 
+  /** TMDB's Animation genre (movies and shows: cartoons and anime), left out with hide_animation=true. */
+  var ANIMATION = 16;
+
+  function animated(o) {
+    for (var i = 0; o.genre_ids && i < o.genre_ids.length; i++) if (o.genre_ids[i] === ANIMATION) return true;
+    return false;
+  }
+
   function addPick(list, o, kind) {
     if (!o.backdrop_path) return;
+    if (CONFIG.hideAnimation && animated(o)) return;
     list.push({id: o.id, kind: kind, title: kind === 'movie' ? o.title : o.name, backdrop: o.backdrop_path, meta: '', app: null, detailed: false});
   }
 
@@ -380,12 +423,13 @@ var Data = (function () {
       if (err) { done(err); return; }
       var ids = [];
       for (var i = 0; res.results && i < res.results.length; i++) {
-        var s = service(res.results[i].provider_name);
+        var s = service(res.results[i].provider_name, res.results[i].provider_id);
         if (s && appFor(s[1])) ids.push(res.results[i].provider_id);
       }
       if (!ids.length) { done(new Error("none of the TV's streaming apps are on TMDB")); return; }
       var common = '&language=' + lang() + '&watch_region=' + REGION + '&with_watch_monetization_types=flatrate&include_adult=false'
-          + '&sort_by=popularity.desc&with_watch_providers=' + encodeURIComponent(ids.join('|'));
+          + '&sort_by=popularity.desc&with_watch_providers=' + encodeURIComponent(ids.join('|'))
+          + (CONFIG.hideAnimation ? '&without_genres=' + ANIMATION : '');
       var hot = {movie: [], tv: []}, fresh = {movie: [], tv: []};
       each(['movie', 'tv'], function (kind, next) {
         tmdb('/trending/' + kind + '/week?language=' + lang(), function (e, r) {
@@ -499,6 +543,7 @@ var Data = (function () {
 
     compact: function (v) {
       if (isNaN(v)) return '—';
+      if (v >= 1000000) return fmt(v / 1000000, 2) + 'M';
       if (v >= 10000) return fmt(v / 1000, 1) + 'k';
       if (v >= 1000) return fmt(v / 1000, 2) + 'k';
       if (v >= 100) return fmt(v, 0);
@@ -516,37 +561,30 @@ var Data = (function () {
       var f = unit === 'F' || (unit === 'auto' && Place.fahrenheit);
       return Math.round(f ? v * 9 / 5 + 32 : v) + '°';
     },
-    hour: function (at) {
-      var d = new Date(at), h = d.getHours();
-      if (I18N.lang === 'en') return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM');
-      if (I18N.lang === 'de') return (h < 10 ? '0' : '') + h + ' Uhr';
-      return (I18N.lang === 'es' || I18N.lang === 'ru') ? (h < 10 ? '0' : '') + h + ':00' : h + 'h';
-    },
-    time: function (at) {
-      var d = new Date(at), h = d.getHours(), m = d.getMinutes();
-      if (I18N.lang === 'en') return (h % 12 || 12) + ':' + (m < 10 ? '0' : '') + m + (h < 12 ? ' AM' : ' PM');
-      return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
-    },
+    /** "3 PM", "15:00", "15 Uhr": the hourly forecast. */
+    hour: function (at) { return formatDate('format|h a', at); },
+    /** "5:21 AM", "05:21": the clock, sunrise and sunset. */
+    time: function (at) { return formatDate('format|h:mm a', at); },
     /** "12 min ago" when the data is old (no internet), or empty. */
     staleness: function (at, every) {
       if (!at) return '';
       var age = Date.now() - at;
       if (age < every * 2) return '';
       var m = Math.floor(age / 60000), h = Math.floor(m / 60);
-      return m < 60 ? tr('há ' + m + ' min', m + ' min ago', 'hace ' + m + ' min') : tr('há ' + h + ' h', h + ' h ago', 'hace ' + h + ' h');
+      return m < 60 ? trf('{n} min ago', {n: m}) : trf('{n} h ago', {n: h});
     },
     condition: function (code, day) {
       if (code === undefined || code === null || code < 0) return '';
-      if (code === 0) return tr(day ? 'Céu limpo' : 'Noite limpa', 'Clear', day ? 'Despejado' : 'Noche despejada');
-      if (code === 1) return tr('Poucas nuvens', day ? 'Mostly Sunny' : 'Mostly Clear', 'Mayormente despejado');
-      if (code === 2) return tr('Parcialmente nublado', 'Partly Cloudy', 'Parcialmente nublado');
-      if (code === 3) return tr('Nublado', 'Cloudy', 'Nublado');
-      if (code === 45 || code === 48) return tr('Neblina', 'Fog', 'Niebla');
-      if (code >= 51 && code <= 57) return tr('Garoa', 'Drizzle', 'Llovizna');
-      if (code === 65 || code === 67 || code === 82) return tr('Chuva forte', 'Heavy Rain', 'Lluvia fuerte');
-      if ((code >= 71 && code <= 77) || code === 85 || code === 86) return tr('Neve', 'Snow', 'Nieve');
-      if (code >= 95) return tr('Tempestade', 'Thunderstorms', 'Tormenta');
-      return tr('Chuva', 'Rain', 'Lluvia');
+      if (code === 0) return day ? tr('Clear') : tr('night|Clear');
+      if (code === 1) return day ? tr('Mostly Sunny') : tr('Mostly Clear');
+      if (code === 2) return tr('Partly Cloudy');
+      if (code === 3) return tr('Cloudy');
+      if (code === 45 || code === 48) return tr('Fog');
+      if (code >= 51 && code <= 57) return tr('Drizzle');
+      if (code === 65 || code === 67 || code === 82) return tr('Heavy Rain');
+      if ((code >= 71 && code <= 77) || code === 85 || code === 86) return tr('Snow');
+      if (code >= 95) return tr('Thunderstorms');
+      return tr('Rain');
     },
     symbol: function (code, day) {
       if (code <= 1) return day ? 'sunny' : 'clear_night';
@@ -557,6 +595,6 @@ var Data = (function () {
       if (code >= 95) return 'thunderstorm';
       return 'rainy';
     },
-    coinName: function (i) { return i === 3 ? tr('Dólar', 'Dollar', 'Dólar') : ['Bitcoin', 'Ethereum', 'Solana'][i]; }
+    coinName: function (i) { return i === 3 ? tr('Dollar') : ['Bitcoin', 'Ethereum', 'Solana'][i]; }
   };
 })();

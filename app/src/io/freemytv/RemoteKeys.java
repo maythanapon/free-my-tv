@@ -12,7 +12,15 @@ import android.view.KeyEvent;
  * Channel); with it off, the keys still arrive, so we open the app the person picked (Settings > Remote Buttons).
  * Disney and Globoplay are opened by the system itself, so they are not listed. The YouTube button (BUTTON_3) never
  * reaches an app's window; only the accessibility service's key filter (RemoteKeyService) sees it.
- * On Vestel TVs only the Netflix button is ours: the system opens Netflix itself (a global key, after the filter).
+ * On Vestel TVs and Formovie (Xiaomi) projectors only the Netflix button is ours: the system opens Netflix itself (a
+ * global key, after the filter).
+ * On KTC TVs (NextStar) only the Tabii button is ours, a global key too: the TV's hot-key receiver opens Tabii with it.
+ * On Sony TVs, the app buttons (and the Google Play button of older remotes) are global keys for Sony's own receiver;
+ * the filter sees them first, the same way.
+ * On Xiaomi TVs whose remote has no Home button, its Mi button is BUTTON_4, a global key that Xiaomi's GlobalKeyReceiver
+ * (partnercustomizer) turns into PatchWall. The filter sees it first, and by default it opens the home screen.
+ * On Xiaomi TVs sold in Russia, the Okko, VK, Rutube, KION, Wink and IVI buttons are global keys too, for Xiaomi's
+ * hot-key receiver (partnercustomizer's GlobalKeyReceiver).
  */
 final class RemoteKeys {
     private RemoteKeys() {}
@@ -24,10 +32,17 @@ final class RemoteKeys {
      * The key codes are the brand's own: on other brands they can be other buttons, so nothing here runs there.
      * Vestel builds TVs sold under other brands (F&U...), so BRAND varies: check the maker too.
      */
-    static final boolean TCL = is("TCL"), VESTEL = is("Vestel");
+    static final boolean TCL = is("TCL"), VESTEL = is("Vestel"), KTC = is("KTC"), SONY = is("Sony"), FORMOVIE = is("Formovie");
+    /**
+     * Xiaomi TVs (models MiTV-M…; MiTV-MSSP3, MediaTek, Android TV 9 tested). Not the Mi Box or Mi TV Stick, the slowest
+     * devices we run on, whose remotes have a Home button; Formovie's Xiaomi projectors have their own remote.
+     */
+    static final boolean XIAOMI = is("Xiaomi") && !FORMOVIE && Build.MODEL.startsWith("MiTV-M");
+    /** Brands whose Netflix button is STEM_1, a global key (MediaTek): only that button is ours. */
+    static final boolean STEM_NETFLIX = VESTEL || FORMOVIE;
 
     static boolean supported() {
-        return TCL || VESTEL;
+        return TCL || STEM_NETFLIX || KTC || SONY || XIAOMI;
     }
 
     private static boolean is(String maker) {
@@ -42,13 +57,23 @@ final class RemoteKeys {
         if ((source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
                 || (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) return false;
         int keyCode = e.getKeyCode() == KEY_YOUTUBE_TCL ? Prefs.KEY_YOUTUBE : e.getKeyCode();
+        // Older Sony remotes share BUTTON codes; newer ones use VIDEO_APP codes. Their scan codes identify the apps.
+        if (SONY && (keyCode == KeyEvent.KEYCODE_BUTTON_4 || keyCode == KeyEvent.KEYCODE_BUTTON_8
+                || keyCode == KeyEvent.KEYCODE_BUTTON_9
+                || (keyCode >= KeyEvent.KEYCODE_VIDEO_APP_1 && keyCode <= KeyEvent.KEYCODE_VIDEO_APP_8))) {
+            keyCode = Prefs.SONY_KEY + e.getScanCode();
+        }
         boolean ours = false;
         for (int key : Prefs.KEYS) ours |= key == keyCode;
         if (!ours) return false;
         String pkg = Prefs.keyApp(keyCode);
         if (pkg.isEmpty()) return false;   // "Nothing": the key goes on as if we weren't here
         if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
-            Intent intent = launchIntent(c.getPackageManager(), pkg);
+            // Our own package means the home screen in use (Xiaomi's Mi button): ours, or the TV's own after the
+            // watchdog handed it back. Not the settings app our launcher icon opens.
+            Intent intent = pkg.equals(HomeMode.PKG)
+                    ? new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                    : launchIntent(c.getPackageManager(), pkg);
             AppLog.w("remote key " + e.getKeyCode() + " -> " + pkg + (intent == null ? " (not installed)" : ""));
             if (intent != null) c.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         }
